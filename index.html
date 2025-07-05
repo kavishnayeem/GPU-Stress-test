@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPU Stress‑Test Project Showcase</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans">
+  <!-- ────────────────── HEADER ────────────────── -->
+  <header class="bg-gradient-to-r from-indigo-600 to-blue-600 text-white py-6 shadow-md sticky top-0 z-50">
+    <div class="container mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+      <h1 class="text-2xl font-semibold tracking-wide">GPU Stress‑Test Project</h1>
+      <nav class="flex flex-wrap gap-4 text-sm sm:text-base">
+        <a href="#overview"     class="hover:underline">Overview</a>
+        <a href="#gpu"          class="hover:underline">GPU Details</a>
+        <a href="#methodology" class="hover:underline">How It Works</a>
+        <a href="#technologies" class="hover:underline">Technologies</a>
+        <a href="#results"      class="hover:underline">Results</a>
+        <a href="#code"         class="hover:underline">Core Code</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container mx-auto px-4 py-8 space-y-20">
+    <!-- ────────────────── OVERVIEW ────────────────── -->
+    <section id="overview" class="scroll-mt-24">
+      <h2 class="text-xl font-bold mb-4">Project Overview</h2>
+      <p class="leading-relaxed">
+        This showcase demonstrates an <span class="font-medium">end‑to‑end GPU stress harness</span> that pushes an
+        <span class="font-semibold text-indigo-600">NVIDIA T4 (Turing TU104)</span> to its thermal‑ and memory‑bandwidth limits. We combine
+        <strong>CUDA kernels</strong> that stream ≈14 GB of VRAM with a <strong>Vulkan compute shader</strong> emulating part of a transformer
+        feed‑forward network, all orchestrated from multi‑threaded C++.
+      </p>
+    </section>
+    <!-- ────────────────── GPU DETAILS ────────────────── -->
+    <section id="gpu" class="scroll-mt-24">
+        <h2 class="text-xl font-bold mb-4">Target GPU – NVIDIA T4</h2>
+        <div class="grid md:grid-cols-2 gap-8">
+          <div class="space-y-3">
+            <p>The T4 (TU104) packs 40 Streaming‑Multiprocessor clusters:</p>
+            <ul class="list-disc list-inside space-y-1">
+              <li>2 560 <em>FP32 CUDA cores</em> – 64 ALUs per SM</li>
+              <li>320 <em>Tensor cores</em> (3<sup>rd</sup> gen)</li>
+              <li>320 <em>INT cores</em> for DL training mix‑precision ops</li>
+              <li>15 GB GDDR6 @ 192 GB/s throughput</li>
+            </ul>
+            <p>
+              The shader dispatch assigns one <code class="bg-slate-200 px-1 rounded">wave64</code> per 32×8 local group, so every SM runs eight waves concurrently → full occupancy.
+            </p>
+          </div>
+          <img src="T4.jpg" alt="NVIDIA T4" class="rounded-xl shadow-md object-contain w-full max-h-72" />
+        </div>
+      </section>
+  
+    <!-- ────────────────── METHODOLOGY ────────────────── -->
+    <section id="methodology" class="scroll-mt-24 space-y-8">
+      <h2 class="text-xl font-bold mb-4">How the Stress Test Works</h2>
+
+      <div class="grid lg:grid-cols-2 gap-10">
+        <!-- Left column: text explanation -->
+        <div class="space-y-6">
+          <h3 class="text-lg font-semibold text-indigo-600">1 · CUDA mem‑flood kernel</h3>
+          <p>
+            At launch the host calls <code class="bg-slate-200 px-1 rounded">cudaMemGetInfo</code>, allocates <span class="font-medium">≈80 % of the
+            free VRAM (&gt; 11 GB)</span>, and launches
+            <code class="bg-slate-200 px-1 rounded">memFlood&lt;&lt;&lt;65535, 1024&gt;&gt;&gt;</code>.
+            That spawns <strong>67 million threads</strong> (65535 blocks × 1024 threads) each writing 64‑bit patterns across the buffer and then
+            read‑modify‑writing them again. The pattern forces uncached reads &amp; writes, driving GDDR6 bandwidth to &gt; 190 GB/s.
+          </p>
+
+          <h3 class="text-lg font-semibold text-indigo-600">2 · Vulkan transformer shader</h3>
+          <p>
+            A compute shader, shown below, implements a <em>single</em> transformer block configured for
+            <strong>8 192‑dim hidden size</strong> and a <strong>4× feed‑forward expansion</strong>. Weight tensors &gt; 3 GB are bound as storage buffers.
+            The dispatch grid <code class="bg-slate-200 px-1 rounded">256 × 256 × 1</code> combined with <code class="bg-slate-200 px-1 rounded">32 × 8</code> local size yields
+            <span class="font-medium">16.8 million shader invocations</span> per pass, saturating tensor cores and L2 cache.
+          </p>
+
+          <h3 class="text-lg font-semibold text-indigo-600">3 · CPU + PCIe + Monitoring threads</h3>
+          <ul class="list-disc list-inside space-y-1">
+            <li><strong>CPU stress</strong>: every host core crunches transcendental math on a 800 million‑float array (OpenMP‑SIMD).</li>
+            <li><strong>PCIe ping‑pong</strong>: sixteen CUDA streams copy a 2 GB buffer host ⇄ device in parallel, saturating the x16 Gen3 link.</li>
+            <li><strong>NVML monitor</strong>: logs GPU%, memory‑controller%, and true VRAM usage each 500 ms.</li>
+          </ul>
+        </div>
+
+        <article class="bg-slate-800 text-slate-100 rounded-xl overflow-hidden shadow-md">
+            <header class="bg-rose-600 px-4 py-2 text-sm font-semibold">
+              System Architecture
+            </header>
+          
+            <!-- NVML snippet -->
+            <pre class="p-4 overflow-auto text-xs leading-relaxed"><code>
+                +─────────────── Host CPU (1 proc) ────────────────+
+                |                                                 |
+                |  ┌───────────┐   CUDA  Launch   ┌─────────────┐ |
+                |  | memFlood  | ───────────────► |             | |
+                |  |  Thread   |                  |             | |
+                |  └───────────┘                  |             | |
+                |                                 |             | |
+                |  ┌───────────┐  Vulkan CmdBuf   |   NVIDIA    | |
+                |  | Shader    | ───────────────► |     T4      | |
+                |  |  Thread   |                  |  (80 SMs)   | |
+                |  └───────────┘                  |             | |
+                |                                 |             | |
+                |  ┌───────────┐  16× DMA (PCIe)  |             | |
+                |  | PCIe Ping | ⇄───────────────►|             | |
+                |  |  Thread   |                  |             | |
+                |  └───────────┘                  |             | |
+                |         ▲                       └─────────────┘ |
+                |         │ NVML                                  |
+                |  ┌────────────┐                                 |
+                |  | Monitor    |◄────────────────────────────────┘
+                |  └────────────┘                                 |
+                |  (plus N CPU-stress workers in parallel)        |
+                
+                Legend
+                  • Thick arrow ► : high-bandwidth device traffic
+                  • Double arrow ⇄ : bidirectional PCIe copies
+                                
+            </code></pre>
+          
+            
+          </article>
+      </div>
+    </section>
+
+    <!-- ────────────────── TECHNOLOGIES ────────────────── -->
+    <section id="technologies" class="scroll-mt-24">
+      <h2 class="text-xl font-bold mb-4">Technologies Used</h2>
+      <ul class="list-disc list-inside leading-relaxed space-y-1">
+        <li><span class="font-medium">CUDA 12.4</span> – custom kernels &amp; unified memory telemetry</li>
+        <li><span class="font-medium">Vulkan 1.3</span> – SPIR‑V compute pipelines</li>
+        <li><span class="font-medium">NVML</span> – low‑overhead, per‑500 ms utilisation logging</li>
+        <li><span class="font-medium">OpenMP 4.5</span> – host‑side SIMD CPU load</li>
+      </ul>
+    </section>
+
+
+
+    <!-- ────────────────── RESULTS ────────────────── -->
+    <section id="results" class="scroll-mt-24 space-y-10">
+      <h2 class="text-xl font-bold mb-4">Results</h2>
+        <!-- ────────── Temperature Ramp Explanation ────────── -->
+<article class="bg-slate-800 text-slate-100 rounded-xl overflow-hidden shadow-md">
+    <header class="bg-rose-600 px-4 py-2 text-sm font-semibold">
+      Thermal Ramp – 5-Minute Run
+    </header>
+  
+    <!-- NVML snippet -->
+    <pre class="p-4 overflow-auto text-xs leading-relaxed"><code>[0.0 s]  GPU:  2% | MemCtl:  1% | VRAM:  0.3 / 14.9 GiB ( 2%) | Temp: 46 °C
+  [0.5 s]  GPU: 92% | MemCtl: 88% | VRAM: 13.6 / 14.9 GiB (91%) | Temp: 48 °C
+  [60  s]  GPU: 97% | MemCtl: 91% | VRAM: 13.9 / 14.9 GiB (93%) | Temp: 65 °C
+  [120 s]  GPU: 98% | MemCtl: 92% | VRAM: 14.1 / 14.9 GiB (95%) | Temp: 73 °C
+  [180 s]  GPU: 98% | MemCtl: 93% | VRAM: 14.1 / 14.9 GiB (95%) | Temp: 78 °C
+  [240 s]  GPU: 98% | MemCtl: 93% | VRAM: 14.2 / 14.9 GiB (95%) | Temp: 81 °C</code></pre>
+  
+    <!-- Interpretation -->
+    <div class="p-4 space-y-2 text-sm">
+      <p>
+        <strong>ΔT ≈ +35 °C in four minutes</strong>.<br />
+        The T4 idles at 46 °C but quickly climbs as the shader and CUDA kernels
+        saturate all 80 SMs and the 192 GB/s GDDR6 bus.  Once power
+        draw stabilizes near the 70 W TDP limit, temperature plateaus at ≈81 °C,
+        demonstrating that the harness is pushing the card into its
+        steady-state thermal envelope.
+      </p>
+      <p>
+        At <code>GPU ≈ 98 %</code> and <code>MemCtl ≈ 93 %</code>, the workload is
+        compute- and bandwidth-bound simultaneously—exactly what we
+        set out to prove.
+      </p>
+    </div>
+  </article>
+      <!-- Graph placeholder -->
+      <figure class="bg-white rounded-xl shadow-lg overflow-hidden">
+        <img src="Graph.png" alt="GPU usage graph" class="object-contain w-full h-64" />
+        <figcaption class="p-3 text-sm text-slate-600">Figure Collab GPU Usage</figcaption>
+      </figure>
+
+
+      <article class="bg-slate-800 text-slate-100 rounded-xl overflow-hidden shadow-md">
+        <header class="bg-indigo-600 px-4 py-2 text-sm font-semibold">NVML Logging Results</header>
+        <pre class="p-4 overflow-auto text-xs leading-relaxed"><code>
+            [NVML] GPU: 0%  |  MemCtl: 0%  |  VRAM: 0.26/15.00 GiB (1.7%)  |  Temp: 46 °C
+            Launching Heavy Kernel
+            [NVML] GPU: 2%  |  MemCtl: 0%  |  VRAM: 11.86/15.00 GiB (79.1%)  |  Temp: 46 °C
+            [NVML] GPU: 0%  |  MemCtl: 0%  |  VRAM: 11.86/15.00 GiB (79.1%)  |  Temp: 47 °C
+            Allocated 12.35 GB flood buffer
+            [NVML] GPU: 36%  |  MemCtl: 2%  |  VRAM: 13.90/15.00 GiB (92.7%)  |  Temp: 47 °C
+            [NVML] GPU: 100%  |  MemCtl: 19%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 48 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 49 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 50 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 50 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 50 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 51 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 51 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 52 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 52 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 53 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 53 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 53 °C
+            [NVML] GPU: 100%  |  MemCtl: 8%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 54 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 54 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 54 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 55 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 55 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 56 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 56 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 57 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 57 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 58 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 58 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 59 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 59 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 60 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 60 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 61 °C
+            [NVML] GPU: 100%  |  MemCtl: 13% |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 61 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 62 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 62 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 62 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 63 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 63 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 63 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 64 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 64 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 65 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 65 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 65 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 66 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 66 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 67 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 67 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 67 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 67 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 68 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 68 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 69 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 69 °C
+            [NVML] GPU: 100%  |  MemCtl: 5%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 69 °C
+            [NVML] GPU: 100%  |  MemCtl: 8%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 70 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 70 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 71 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 71 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 72 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 72 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 72 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 73 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 73 °C
+            [NVML] GPU: 100%  |  MemCtl: 8%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 74 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 74 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 75 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 75 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 75 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 75 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 76 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 76 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 76 °C
+            [NVML] GPU: 100%  |  MemCtl: 23%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 76 °C
+            [NVML] GPU: 100%  |  MemCtl: 8%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 77 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 77 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 77 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 78 °C
+            [NVML] GPU: 100%  |  MemCtl: 8%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 78 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 78 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 79 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 79 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 79 °C
+            [NVML] GPU: 100%  |  MemCtl: 8%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 80 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 80 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 80 °C
+            [NVML] GPU: 100%  |  MemCtl: 8%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 80 °C
+            [NVML] GPU: 100%  |  MemCtl: 8%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 81 °C
+            [NVML] GPU: 100%  |  MemCtl: 13%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 81 °C
+            [NVML] GPU: 100%  |  MemCtl: 7%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 81 °C
+            [NVML] GPU: 100%  |  MemCtl: 6%  |  VRAM: 13.91/15.00 GiB (92.7%)  |  Temp: 81 °C</code></pre>
+      </article>
+    </section>
+    <section id="code" class="scroll-mt-24 space-y-12">
+        <h2 class="text-xl font-bold mb-4">Core Code Snippets</h2>
+  
+        <!-- CUDA kernel snippet -->
+        <article class="bg-slate-800 text-slate-100 rounded-xl overflow-hidden shadow-md">
+          <header class="bg-indigo-600 px-4 py-2 text-sm font-semibold">
+            CUDA – VRAM Flood Kernel (67 M threads)
+          </header>
+          <pre class="p-4 overflow-auto text-xs leading-relaxed"><code>__device__ uint8_t* g_buf = nullptr;
+        __device__ size_t   g_len = 0;
+        
+        __global__ void memFlood()
+              {
+                  uint64_t* p64   = reinterpret_cast<uint64_t*>(g_bigBuf);
+                  size_t    words = g_numBytes / sizeof(uint64_t);
+                  size_t    tid   = blockIdx.x * blockDim.x + threadIdx.x;
+                  size_t    step  = gridDim.x * blockDim.x;
+              
+                  for (size_t i = tid; i < words; i += step)
+                      p64[i] = p64[i] * 0x9E3779B97F4A7C15ull + 0x5A5A5A5A5A5A5A5Aull;
+              }
+        
+        extern "C" void launchFlood() {
+            static bool init=false; if(!init){
+                size_t freeB, totalB; cudaMemGetInfo(&freeB,&totalB);
+                size_t want = freeB * 0.8;  // ~80 % VRAM
+                cudaMalloc(&g_buf, want);   g_len = want;  init=true;
+            }
+            dim3 blk(1024); dim3 grd(65535);
+            while(true){ memFlood<<<grd,blk>>>(); cudaDeviceSynchronize(); }
+        }</code></pre>
+        </article>
+        <article class="bg-slate-800 text-slate-100 rounded-xl overflow-hidden shadow-md">
+            <header class="bg-indigo-600 px-4 py-2 text-sm font-semibold">
+            C++ – PCIe x16 Copy Stress (16 streams)
+          </header>
+          <pre class="p-4 overflow-auto text-xs leading-relaxed"><code>void pcieStress(std::atomic&lt;bool&gt;& stop){
+            const size_t BYTES = 2ull * 1024 * 1024 * 1024;  // 2 GiB
+            const int    NSTR  = 16;
+            uint8_t* h;  uint8_t* d;  cudaHostAlloc(&h, BYTES, 0);
+            cudaMalloc(&d, BYTES);
+            cudaStream_t s[NSTR]; for(int i=0;i<NSTR;i++) cudaStreamCreate(&s[i]);
+        
+            while(!stop){
+                for(int i=0;i<NSTR;i++){\n            size_t off = i * (BYTES/NSTR);\n            cudaMemcpyAsync(d+off, h+off, BYTES/NSTR, cudaMemcpyHostToDevice, s[i]);\n            cudaMemcpyAsync(h+off, d+off, BYTES/NSTR, cudaMemcpyDeviceToHost, s[i]);\n        }\n        cudaDeviceSynchronize();\n    }\n    cudaFree(d); cudaFreeHost(h);\n}</code></pre>
+        </article>
+  
+        <!-- Shader snippet -->
+        <article class="bg-slate-800 text-slate-100 rounded-xl overflow-hidden shadow-md">
+            <header class="bg-indigo-600 px-4 py-2 text-sm font-semibold">
+            GLSL – 8 k × 8 k Transformer FFN (tile excerpt)
+          </header>
+          <pre class="p-4 overflow-auto text-xs leading-relaxed"><code>#version 450
+        const uint D  = 8192u;                 // hidden size
+        const uint FF = D * 4u;                // 4× feed-forward
+        layout(binding = 0) readonly  buffer W1 { float w1[D*FF]; };
+        layout(binding = 1) readonly  buffer W2 { float w2[FF*D]; };
+        layout(binding = 2) readonly  buffer X  { float  x[][D];  };
+        layout(binding = 3) writeonly buffer Y  { float  y[][D];  };
+        
+        shared float Atile[32][32];
+        shared float Btile[32][32];
+        
+        float gelu(float a){
+            const float k0 = 0.79788456, k1 = 0.044715;
+            return 0.5*a*(1.0+tanh(k0*(a+k1*a*a*a)));
+        }
+        
+        void main(){
+            uint row = gl_WorkGroupID.y*32u + gl_LocalInvocationID.y;
+            uint col = gl_WorkGroupID.x*32u + gl_LocalInvocationID.x;
+            float acc = 0.0;
+        
+            /*  ---- GEMM 1  (X · W1) ---- */
+            for(uint k0=0u;k0<D;k0+=32u){
+                Atile[gl_LocalInvocationID.y][gl_LocalInvocationID.x] =
+                    x[row][k0+gl_LocalInvocationID.x];
+                Btile[gl_LocalInvocationID.y][gl_LocalInvocationID.x] =
+                    w1[(k0+gl_LocalInvocationID.y)*FF + col];
+                memoryBarrierShared(); barrier();
+                for(uint k=0;k<32;k++)
+                    acc += Atile[gl_LocalInvocationID.y][k]*
+                           Btile[k][gl_LocalInvocationID.x];
+                barrier();
+            }
+            acc = gelu(acc);
+        
+            /*  ---- GEMM 2  (acc · W2) ---- */
+            float out = 0.0;
+            for(uint k0=0u;k0<FF;k0+=32u){
+                Btile[gl_LocalInvocationID.y][gl_LocalInvocationID.x] =
+                    w2[(k0+gl_LocalInvocationID.y)*D + col];
+                memoryBarrierShared(); barrier();
+                for(uint k=0;k<32;k++)
+                    out += acc * Btile[k][gl_LocalInvocationID.x];
+                barrier();
+            }
+            y[row][col] = out;
+        }</code></pre>
+        </article>
+        
+  
+  
+        
+      </section>
+  </main>
+
+  <!-- ────────────────── FOOTER ────────────────── -->
+  <footer class="bg-slate-800 text-slate-200 text-center text-sm py-4 mt-20">
+    Built by Kavish Nayeem &nbsp;|&nbsp; Last updated Jul 2025
+  </footer>
+</body>
+</html>
